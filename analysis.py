@@ -1,4 +1,6 @@
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from pathlib import Path
 
 DATASETS_DIR = Path("datasets")
@@ -13,110 +15,109 @@ DATASETS = {
 }
 
 RAINFALL_FILE = DATASETS_DIR / "rainfall_annual.csv"
-OUTPUT_FILE = DATASETS_DIR / "disease_analytics_summary.csv"
 
-# --- Load + normalize rainfall (monthly long format) ---
+# -----------------------------
+# Load rainfall (same logic as yours)
+# -----------------------------
+
 rainfall_wide = pd.read_csv(RAINFALL_FILE)
 
+month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
 rainfall_long = rainfall_wide.melt(
-    id_vars=["Area"],
+    id_vars=["District"],
+    value_vars=month_order,
     var_name="month_name",
-    value_name="avg_rainfall_mm",
+    value_name="avg_rainfall_mm"
 )
 
-month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-month_to_num = {m: i + 1 for i, m in enumerate(month_order)}
+rainfall_long["avg_rainfall_mm"] = pd.to_numeric(
+    rainfall_long["avg_rainfall_mm"].astype(str).str.replace(",", ""),
+    errors="coerce"
+)
+
+month_to_num = {m: i+1 for i, m in enumerate(month_order)}
 rainfall_long["month"] = rainfall_long["month_name"].map(month_to_num)
 
-# normalize area keys a bit for safer joins
-rainfall_long["area_key"] = rainfall_long["Area"].astype(str).str.strip().str.casefold()
+rainfall_long["area_key"] = rainfall_long["District"].astype(str).str.strip().str.casefold()
 
-# --- Helpers ---
-def week_to_month(week_number: int) -> int:
-    """
-    Approximate mapping from epidemiological week number (1..52/53) to month (1..12).
-    Uses equal-length month buckets; good enough for correlation/overlay summaries.
-    """
+# -----------------------------
+# Helper: week to month
+# -----------------------------
+
+def week_to_month(week_number):
     wk = int(week_number)
     wk = max(1, min(53, wk))
     return int(((wk - 1) / 53) * 12) + 1
 
-results = []
+
+# =============================
+# MAIN VISUALIZATION LOOP
+# =============================
 
 for dataset_name, file_name in DATASETS.items():
+
+    print(f"Processing {dataset_name}")
+
     year, disease = dataset_name.split("_", 1)
-    file_path = DATASETS_DIR / file_name
+    df = pd.read_csv(DATASETS_DIR / file_name)
 
-    df = pd.read_csv(file_path)
-
-    # Normalize keys for joins
     df["area_key"] = df["area_reported"].astype(str).str.strip().str.casefold()
     df["week_number"] = pd.to_numeric(df["week_number"], errors="coerce")
+    df["cases_reported"] = pd.to_numeric(df["cases_reported"], errors="coerce")
 
-    # Add month derived from week_number
     df["month"] = df["week_number"].dropna().astype(int).map(week_to_month)
-    df["month"] = pd.to_numeric(df["month"], errors="coerce")
 
-    # --- Most affected areas (top 5) with annual rainfall context (mean across months) ---
-    area_summary = (
-        df.groupby(["area_reported", "area_key"], dropna=False)["cases_reported"]
-        .sum()
-        .reset_index()
-        .sort_values("cases_reported", ascending=False)
-        .head(5)
+    # Merge rainfall
+    merged = df.merge(
+        rainfall_long[["area_key", "month", "avg_rainfall_mm"]],
+        on=["area_key", "month"],
+        how="left"
     )
 
-    annual_rainfall_by_area = (
-        rainfall_long.groupby("area_key", dropna=False)["avg_rainfall_mm"].mean().reset_index()
-    ).rename(columns={"avg_rainfall_mm": "avg_annual_rainfall_mm"})
-
-    area_summary = area_summary.merge(annual_rainfall_by_area, on="area_key", how="left")
-
-    for _, row in area_summary.iterrows():
-        results.append(
-            {
-                "year": year,
-                "disease": disease,
-                "analysis_type": "Most Affected Area",
-                "identifier": row["area_reported"],
-                "value": row["cases_reported"],
-                "avg_annual_rainfall_mm": row.get("avg_annual_rainfall_mm"),
-            }
-        )
-
-    # --- Peak weeks (top 5) with rainfall for the peak month (nationally averaged) ---
-    week_summary = (
-        df.groupby("week_number", dropna=False)["cases_reported"]
+    # Get top 3 affected areas for clearer visualization
+    top_areas = (
+        merged.groupby("area_reported")["cases_reported"]
         .sum()
-        .reset_index()
-        .dropna(subset=["week_number"])
-        .sort_values("cases_reported", ascending=False)
-        .head(5)
+        .sort_values(ascending=False)
+        .head(3)
+        .index
     )
-    week_summary["week_number"] = week_summary["week_number"].astype(int)
-    week_summary["month"] = week_summary["week_number"].map(week_to_month)
 
-    # national monthly avg rainfall (avg across all areas for that month)
-    national_rainfall_by_month = (
-        rainfall_long.groupby("month", dropna=False)["avg_rainfall_mm"].mean().reset_index()
-    ).rename(columns={"avg_rainfall_mm": "national_avg_rainfall_mm"})
+    for area in top_areas:
 
-    week_summary = week_summary.merge(national_rainfall_by_month, on="month", how="left")
+        area_df = merged[merged["area_reported"] == area]
+        area_df = area_df.sort_values("week_number")
 
-    for _, row in week_summary.iterrows():
-        results.append(
-            {
-                "year": year,
-                "disease": disease,
-                "analysis_type": "Peak Week",
-                "identifier": f"Week {int(row['week_number'])}",
-                "value": row["cases_reported"],
-                "month": int(row["month"]),
-                "national_avg_rainfall_mm": row.get("national_avg_rainfall_mm"),
-            }
+        fig, ax1 = plt.subplots(figsize=(12,6))
+
+        # Disease trend
+        ax1.plot(
+            area_df["week_number"],
+            area_df["cases_reported"],
+            color="red",
+            marker="o",
+            label="Cases Reported"
         )
 
-analytics_df = pd.DataFrame(results)
-analytics_df.to_csv(OUTPUT_FILE, index=False)
+        ax1.set_xlabel("Week Number")
+        ax1.set_ylabel("Cases Reported", color="red")
+        ax1.tick_params(axis='y', labelcolor='red')
 
-print(f"Analytics saved to {OUTPUT_FILE}")
+        # Rainfall on secondary axis
+        ax2 = ax1.twinx()
+        ax2.plot(
+            area_df["week_number"],
+            area_df["avg_rainfall_mm"],
+            color="blue",
+            linestyle="dashed",
+            label="Rainfall (mm)"
+        )
+
+        ax2.set_ylabel("Rainfall (mm)", color="blue")
+        ax2.tick_params(axis='y', labelcolor='blue')
+
+        plt.title(f"{disease} Weekly Trend vs Rainfall\n{area} - {year}")
+
+        fig.tight_layout()
+        plt.show()

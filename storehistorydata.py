@@ -1,5 +1,6 @@
 import uuid
 import warnings
+from pathlib import Path
 
 import pandas as pd
 import psycopg2
@@ -7,7 +8,6 @@ import psycopg2.extras
 
 warnings.filterwarnings("ignore")
 
-# Register UUID adapter for psycopg2
 psycopg2.extras.register_uuid()
 
 DB_CONFIG = {
@@ -16,6 +16,17 @@ DB_CONFIG = {
     "database": "epilanka",
     "user": "avnadmin",
     "password": "AVNS_PEp6c7CMZQHAPYVNCEX",
+}
+
+DATASETS_DIR = Path("datasets")
+
+HISTORICAL_FILES = {
+    (2023, "Dysentery"): DATASETS_DIR / "2023_Dysentery.csv",
+    (2024, "Dysentery"): DATASETS_DIR / "2024_Dysentery.csv",
+    (2025, "Dysentery"): DATASETS_DIR / "2025_Dysentery.csv",
+    (2023, "Meningitis"): DATASETS_DIR / "2023_Meningitis.csv",
+    (2024, "Meningitis"): DATASETS_DIR / "2024_Meningitis.csv",
+    (2025, "Meningitis"): DATASETS_DIR / "2025_Meningitis.csv",
 }
 
 DISTRICT_MAP = {
@@ -59,7 +70,6 @@ DISTRICT_ALIASES = {
 DISEASE_ID_MAP = {
     "dysentery": 1,
     "meningitis": 2,
-    "tuberculosis": 3,
 }
 
 
@@ -69,13 +79,13 @@ def normalize_district_name(value: str) -> str:
     return district.replace(" ", "")
 
 
-def ensure_reports_conflict_constraint(cursor) -> None:
+def ensure_historicaldata_conflict_constraint(cursor) -> None:
     cursor.execute(
         """
         SELECT 1
         FROM pg_constraint c
         JOIN pg_class t ON t.oid = c.conrelid
-        WHERE t.relname = 'reports'
+        WHERE t.relname = 'historicaldata'
           AND c.contype = 'u'
           AND pg_get_constraintdef(c.oid) = 'UNIQUE (week_number, year, district_id, disease_id)'
         LIMIT 1
@@ -86,30 +96,42 @@ def ensure_reports_conflict_constraint(cursor) -> None:
 
     cursor.execute(
         """
-        ALTER TABLE reports
-        ADD CONSTRAINT reports_week_year_district_disease_uniq
+        ALTER TABLE historicaldata
+        ADD CONSTRAINT historicaldata_week_year_district_disease_uniq
         UNIQUE (week_number, year, district_id, disease_id)
         """
     )
 
 
-def store_predictions(csv_file: str) -> None:
-    df = pd.read_csv(csv_file)
+def load_historical_dataframe() -> pd.DataFrame:
+    frames = []
 
-    required_cols = {"year", "week_number", "area_reported", "disease", "predicted_cases"}
+    for (year, disease), file_path in HISTORICAL_FILES.items():
+        df = pd.read_csv(file_path)
+        df["year"] = year
+        df["disease"] = disease
+        frames.append(df)
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def store_historical_data() -> None:
+    df = load_historical_dataframe()
+
+    required_cols = {"year", "week_number", "area_reported", "disease", "cases_reported"}
     missing = required_cols - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
-    df["area_reported"] = df["area_reported"].astype(str).str.strip()
+    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    df["week_number"] = pd.to_numeric(df["week_number"], errors="coerce").astype("Int64")
+    df["cases_reported"] = pd.to_numeric(df["cases_reported"], errors="coerce")
     df["district_key"] = df["area_reported"].map(normalize_district_name)
     df["disease_key"] = df["disease"].astype(str).str.strip().str.casefold()
 
-    df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
-    df["week_number"] = pd.to_numeric(df["week_number"], errors="coerce").astype("Int64")
-    df["predicted_cases"] = pd.to_numeric(df["predicted_cases"], errors="coerce")
-
-    df = df.dropna(subset=["year", "week_number", "area_reported", "disease_key", "predicted_cases"])
+    df = df.dropna(
+        subset=["year", "week_number", "area_reported", "disease_key", "cases_reported"]
+    )
 
     df["district_id"] = df["district_key"].map(DISTRICT_MAP)
     df["disease_id"] = df["disease_key"].map(DISEASE_ID_MAP)
@@ -123,50 +145,50 @@ def store_predictions(csv_file: str) -> None:
     cursor = conn.cursor()
 
     try:
-        ensure_reports_conflict_constraint(cursor)
+        ensure_historicaldata_conflict_constraint(cursor)
 
-        upserted = 0
+        inserted = 0
 
-        for wk, yr, did, disid, pc in zip(
+        for wk, yr, did, disid, count in zip(
             df["week_number"],
             df["year"],
             df["district_id"],
             df["disease_id"],
-            df["predicted_cases"],
+            df["cases_reported"],
         ):
-            report_id = uuid.uuid4()
+            data_id = uuid.uuid4()
 
             cursor.execute(
                 """
-                INSERT INTO reports
-                    (report_id, week_number, year, district_id, disease_id, case_count)
+                INSERT INTO historicaldata
+                    (data_id, week_number, year, district_id, disease_id, case_count)
                 VALUES
                     (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (week_number, year, district_id, disease_id)
-                DO UPDATE SET case_count = EXCLUDED.case_count
+                DO NOTHING
                 """,
                 (
-                    report_id,
+                    data_id,
                     int(wk),
                     int(yr),
                     int(did),
                     int(disid),
-                    int(round(float(pc))),
+                    int(round(float(count))),
                 ),
             )
-            upserted += 1
+            inserted += 1
 
         conn.commit()
 
-        print(f"[OK] Upsert attempted for {upserted} rows")
+        print(f"[OK] Insert attempted for {inserted} rows into historicaldata")
         if skipped_unknown_district:
             print(f"[WARN] Skipped {skipped_unknown_district} rows due to unknown districts")
         if skipped_unknown_disease:
             print(f"[WARN] Skipped {skipped_unknown_disease} rows due to unknown diseases")
 
-    except Exception as e:
+    except Exception as exc:
         conn.rollback()
-        print("[ERROR]", e)
+        print("[ERROR]", exc)
         raise
     finally:
         cursor.close()
@@ -174,5 +196,4 @@ def store_predictions(csv_file: str) -> None:
 
 
 if __name__ == "__main__":
-    CSV_FILE = r"datasets\predictions_2026.csv"
-    store_predictions(CSV_FILE)
+    store_historical_data()
