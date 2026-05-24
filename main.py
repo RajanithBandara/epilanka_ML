@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from calculatethreshold import main as calculate_thresholds_and_store_risk_levels
-from convertdatatodistrictdataset import main as harmonize_tuberculosis_datasets
-from predict_year import default_output_path, generate_predictions
-from store_predictions import store_predictions
-from storehistorydata import store_historical_data
-from storetuberculosisdata import store_tuberculosis_data
-from train_predict_models import train_prediction_model
+from analytics.run import run_analytics
+from pipeline.compute_risk import calculate_thresholds_and_store_risk_levels
+from pipeline.generate_predictions import default_output_path, generate_predictions
+from pipeline.store_historical import store_historical_data
+from pipeline.store_population import store_population_data
+from pipeline.store_predictions import store_predictions
+from pipeline.store_rainfall import store_rainfall_data
+from pipeline.train_model import train_prediction_model
 
 
 def prompt_text(message: str, default: str | None = None) -> str:
@@ -61,15 +62,42 @@ def run_train_generate_and_store() -> None:
     store_predictions(str(output_file))
 
 
+def run_full_pipeline() -> None:
+    prediction_year = prompt_int("Prediction year", 2026)
+
+    print("\n[1/7] Storing district population data...")
+    store_population_data()
+
+    print("\n[2/7] Storing annual rainfall data...")
+    store_rainfall_data()
+
+    print("\n[3/7] Storing historical case data (all diseases)...")
+    store_historical_data()
+
+    print("\n[4/7] Calculating thresholds and risk levels...")
+    calculate_thresholds_and_store_risk_levels()
+
+    print("\n[5/7] Training prediction model...")
+    train_prediction_model()
+
+    print(f"\n[6/7] Generating {prediction_year} predictions...")
+    output_file = generate_predictions(prediction_year=prediction_year)
+
+    print(f"\n[7/7] Storing {prediction_year} predictions in database...")
+    store_predictions(str(output_file))
+
+
 MENU_OPTIONS = {
-    "1": ("Convert tuberculosis datasets to district format", harmonize_tuberculosis_datasets),
-    "2": ("Store dysentery and meningitis historical data", store_historical_data),
-    "3": ("Store tuberculosis historical data", store_tuberculosis_data),
+    "1": ("Store district population data", store_population_data),
+    "2": ("Store annual rainfall data (CSV → rainfall_data)", store_rainfall_data),
+    "3": ("Store historical data for all diseases (Dysentery, Meningitis, Tuberculosis)", store_historical_data),
     "4": ("Calculate thresholds and store risk levels", calculate_thresholds_and_store_risk_levels),
     "5": ("Train prediction model", run_train_model),
     "6": ("Generate prediction CSV", run_generate_predictions),
     "7": ("Store prediction CSV in database", run_store_predictions),
     "8": ("Train model, generate predictions, and store them", run_train_generate_and_store),
+    "9": ("Run full pipeline end-to-end", run_full_pipeline),
+    "10": ("Run analytics (disease patterns, rain patterns, correlations)", run_analytics),
 }
 
 
