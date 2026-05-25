@@ -84,7 +84,7 @@ def store_historical_data() -> None:
                     VALUES
                         (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (week_number, year, district_id, disease_id)
-                    DO NOTHING
+                    DO UPDATE SET case_count = EXCLUDED.case_count
                     """,
                     (
                         uuid.uuid4(),
